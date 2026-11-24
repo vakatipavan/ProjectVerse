@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // --- Users Collection ---
+    match /users/{userId} {
+      // Anyone can read basic profile info; private fields can be queried accordingly
+      allow read: if true;
+      // Users can create their own document on registration without setting role as 'admin'
+      allow create: if isOwner(userId) && request.resource.data.role == 'user';
+      // Users can update their own profile, but CANNOT self-escalate their role
+      allow update: if isOwner(userId) && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']))
+                    || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // --- Projects Collection ---
+    match /projects/{projectId} {
+      // Anyone can read approved projects. Project owners or admins can read unapproved ones
+      allow read: if resource.data.approved == true || (isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin()));
+
+      // Authenticated users can submit projects with status pending and approved=false
+      allow create: if isAuthenticated() &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.approved == false &&
+        request.resource.data.moderationStatus == 'pending';
+
+      // Owners can update non-moderation fields. Only admins can modify 'approved' and 'moderationStatus'
+      allow update: if (isOwner(resource.data.ownerId) &&
+                        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['approved', 'moderationStatus', 'ownerId']))
+                    || isAdmin()
+                    // Allow atomic increments for views and likes counters
+                    || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views']))
+                    || (request.resource.data.diff(resource.data).affectedKeys().hasAny(['likes', 'likedBy']));
+
+      allow delete: if isOwner(resource.data.ownerId) || isAdmin();
+    }
+
+    // --- Categories Collection ---
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // --- Bookmarks Collection ---
+    match /bookmarks/{bookmarkId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // --- Likes Collection ---
+    match /likes/{likeId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // --- Reports Collection ---
+    match /reports/{reportId} {
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if isAdmin();
+    }
+
+    // --- Collaboration Requests Collection ---
+    match /collaboration_requests/{requestId} {
+      allow create: if isAuthenticated() && request.resource.data.fromUserId == request.auth.uid;
+      allow read: if isAuthenticated() && (
+        resource.data.fromUserId == request.auth.uid ||
+        // or the owner of the referenced project
+        get(/databases/$(database)/documents/projects/$(resource.data.projectId)).data.ownerId == request.auth.uid ||
+        isAdmin()
+      );
+      allow update, delete: if isAuthenticated() && (
+        resource.data.fromUserId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+  }
+}
